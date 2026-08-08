@@ -3,6 +3,7 @@ call %~dp0opensfm.bat detect_features %1
 call %~dp0opensfm.bat match_features %1
 call %~dp0opensfm.bat create_tracks %1
 call %~dp0opensfm.bat reconstruct %1
+python "%~dp0export_camera_poses.py" %1 --proj EPSG:32645 --geoid "C:\Program Files\Agisoft\Metashape Pro\geoids\us_nga_egm2008_1.tif"
 call %~dp0opensfm.bat mesh %1
 call %~dp0opensfm.bat undistort %1
 call %~dp0opensfm.bat dense_equalize %1
