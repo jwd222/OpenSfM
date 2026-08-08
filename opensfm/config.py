@@ -512,6 +512,8 @@ class OpenSfMConfig:
     depthmap_fusion_svo_coarse_factor: int = 16
     # Fusion chunk size: max coarse cells per chunk = the assignment granularity of the global KD-tree split (each chunk is fused by its best inverse-depth observers, points + DSM clipped to its disjoint core). 0 = auto (one GPU sub-volume's worth = svo_max_voxels / coarse_factor^3). Smaller = more, tighter chunks (smaller DSM tiles, tighter per-chunk view sets, more seams); larger = fewer chunks (bigger tiles, but the per-chunk view cap may drop coverage).
     depthmap_fusion_chunk_max_cells: int = 0
+    # Recursively split fusion chunks whose cells can't all be covered within the per-chunk view budget (depthmap_max_cluster_views), closing budget-driven fusion holes at the cost of more, smaller chunks.
+    depthmap_fusion_adaptive_chunking: bool = False
     # Photometric TSDF refinement
     depthmap_fusion_svo_refine_enabled: bool = False
     # Number of SDF refinement iterations.

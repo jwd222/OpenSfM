@@ -1,12 +1,13 @@
 # pyre-strict
 from pathlib import Path
+from types import SimpleNamespace
 import pytest
 
 import numpy as np
 from opensfm import dense, io, pygeometry, pymap, types, pydense
 from opensfm.config import default_config
 from opensfm.dense.equalize import estimate_image_corrections, apply_equalization
-from opensfm.dense import crop
+from opensfm.dense import crop, fusion
 from opensfm.dataset import UndistortedDataSet
 from opensfm.dense.dsm_ortho import (
     _component_elongation,
@@ -23,6 +24,7 @@ from opensfm.dense.fusion import (
     _pack_coarse_cells,
     _prescan_coarse_grid,
     _select_chunk_views,
+    _select_chunk_views_greedy,
     _trim_sparse_ends,
 )
 
@@ -419,6 +421,114 @@ def test_select_chunk_views_min_two_observers() -> None:
         cpk, weighted[:2], view_ukey2, origin, span, 5, min_obs=2
     )
     assert n_unc == 1  # cell 3 can never get a 2nd observer
+
+
+def test_select_chunk_views_greedy_cover_prefers_broad_views() -> None:
+    # 6 chunk cells along x.  High-weight views A, B, C each cover a narrow
+    # 2-cell strip; LOW-weight view D covers everything.  The single-pass
+    # selection (_select_chunk_views) walks weight order and spends the whole
+    # budget on A, B, C; greedy maximum-coverage (_select_chunk_views_greedy,
+    # behind depthmap_fusion_adaptive_chunking) picks D first — one view
+    # covers all.
+    cells = np.array([[i, 0, 0] for i in range(6)], dtype=np.int64)
+    origin = cells.min(0)
+    span = cells.max(0) - origin + 1
+    cpk = np.sort(_pack_coarse_cells(cells, origin, span))
+
+    def uk(idxs: list) -> np.ndarray:
+        return np.array([[i, 0, 0] for i in idxs], dtype=np.int64)
+
+    view_ukey = {
+        "A": uk([0, 1]),
+        "B": uk([2, 3]),
+        "C": uk([4, 5]),
+        "D": uk([0, 1, 2, 3, 4, 5]),
+    }
+    weighted = ["A", "B", "C", "D"]  # D is worst
+
+    # Budget 1: single pass keeps A (4 cells unfused); greedy takes D (0 unfused).
+    views, n_unc = _select_chunk_views(
+        cpk, weighted, view_ukey, origin, span, 1)
+    assert views == ["A"] and n_unc == 4
+    views, n_unc = _select_chunk_views_greedy(
+        cpk, weighted, view_ukey, origin, span, 1
+    )
+    assert views == ["D"] and n_unc == 0
+
+    # Budget 3: greedy covers with D, then fills with the best skipped views.
+    views, n_unc = _select_chunk_views_greedy(
+        cpk, weighted, view_ukey, origin, span, 3
+    )
+    assert views == ["D", "A", "B"] and n_unc == 0
+
+    # min_obs=2 with budget 3: D + A + B → cells 4,5 stay single-observer.
+    views, n_unc = _select_chunk_views_greedy(
+        cpk, weighted, view_ukey, origin, span, 3, min_obs=2
+    )
+    assert views == ["D", "A", "B"] and n_unc == 2
+
+
+def test_adaptive_chunking_covers_cells_the_legacy_budget_left_as_holes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # THE hole scenario of depthmap_fusion_adaptive_chunking: 6 coarse cells
+    # in a row, 3 views (A, B, C) each observing a 2-cell strip, but a
+    # per-chunk budget of max_views=2.  Every cell HAS an observer, so no
+    # cell is data-limited — yet the legacy fixed chunk can only afford two
+    # of the three views, leaving one strip with no selected observer: a
+    # budget-limited hole.  The adaptive builder must bisect the chunk so
+    # each half fits the budget and nothing is left unfused.
+    def cells_of(*xs: int) -> np.ndarray:
+        return np.array([[x, 0, 0] for x in xs], dtype=np.int64)
+
+    prescan = {
+        "A": cells_of(0, 1),
+        "B": cells_of(2, 3),
+        "C": cells_of(4, 5),
+    }
+    observers = {
+        sid: {tuple(int(v) for v in row) for row in cells}
+        for sid, cells in prescan.items()
+    }
+
+    def fake_prescan(data, sid, shot, inv_coarse, depth_factor, subsample):
+        cells = prescan[sid]
+        return sid, cells, np.ones(len(cells))
+
+    monkeypatch.setattr(fusion, "_prescan_view_weights", fake_prescan)
+
+    data = SimpleNamespace(config={"processes": 1})
+    reconstruction = SimpleNamespace(shots={sid: None for sid in prescan})
+    kwargs = dict(
+        voxel_size=1.0, coarse_factor=16, max_chunk_cells=100, max_views=2,
+        depth_factor=2.0, footprint_close=1, min_observers=1,
+    )
+
+    def n_holey_cells(units) -> int:
+        # Cells with fewer than min_observers SELECTED views — unfused holes.
+        return sum(
+            1
+            for unit in units
+            for cell in unit.cells
+            if sum(cell in observers[v] for v in unit.views) < 1
+        )
+
+    # Legacy: one chunk, budget 2 → one strip (2 cells) left without a view.
+    legacy_units, _ = fusion._build_global_chunks(
+        data, reconstruction, list(prescan), **kwargs
+    )
+    assert len(legacy_units) == 1
+    assert n_holey_cells(legacy_units) == 2
+
+    # Adaptive: the chunk splits until coverage fits the budget — no holes.
+    adaptive_units, _ = fusion._build_global_chunks_adaptive(
+        data, reconstruction, list(prescan), **kwargs
+    )
+    assert len(adaptive_units) == 2
+    assert n_holey_cells(adaptive_units) == 0
+    # ...and the finer partition stays disjoint and complete.
+    all_cells = [cell for unit in adaptive_units for cell in unit.cells]
+    assert len(all_cells) == len(set(all_cells)) == 6
 
 
 def test_dilate_core_xy_grows_into_observed_neighbours() -> None:

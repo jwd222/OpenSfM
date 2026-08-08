@@ -931,7 +931,14 @@ def robust_match_fundamental(
 
     FM_RANSAC = cv2.FM_RANSAC if context.OPENCV3 else cv2.cv.CV_FM_RANSAC
     threshold = config["robust_matching_threshold"]
-    F, mask = cv2.findFundamentalMat(p1, p2, FM_RANSAC, threshold, 0.9999)
+    try:
+        F, mask = cv2.findFundamentalMat(p1, p2, FM_RANSAC, threshold, 0.9999)
+    except cv2.error:
+        logger.warning(
+            "cv2.findFundamentalMat failed for {} matches".format(len(matches))
+        )
+        return None, np.array([])
+    
     inliers = mask.ravel().nonzero()
 
     if F is None or F[2, 2] == 0.0:
